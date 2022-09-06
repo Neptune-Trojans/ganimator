@@ -2,7 +2,7 @@ import os
 import sys
 import torch
 from dataset.motion import MotionData, load_multiple_dataset
-from models import create_model, create_layered_model, get_group_list
+from models import create_model, create_conditional_model, get_group_list
 from models.architecture import get_pyramid_lengths, joint_train
 from models.utils import get_interpolator
 from option import TrainOptionParser
@@ -63,7 +63,7 @@ def main():
     writer = SummaryWriter(pjoin(args.save_path, './logs'))
     loss_recorder = LossRecorder(writer)
 
-    if len(args.path_to_existing) and args.layered_generator:
+    if args.path_to_existing and args.conditional_generator:
         ConGen = load_all_from_path(args.path_to_existing, args.device, use_class=True)
     else:
         ConGen = None
@@ -91,7 +91,7 @@ def main():
                 z_star[i] *= amps[i][0]
             gt_deltas[i].append(reals[i][-1] - interpolator(last_real, length))
 
-        create = create_layered_model if args.layered_generator and step < args.num_layered_generator else create_model
+        create = create_conditional_model if args.conditional_generator and step < args.num_conditional_generator else create_model
         gen, disc, gan_model = create(args, motion_data, evaluation=False)
 
         gens.append(gen)
@@ -107,7 +107,7 @@ def main():
         curr_stage = last_stage + len(group)
         group_gan_models = [gans[i] for i in group]
         joint_train(reals, gens[:curr_stage], group_gan_models, lengths,
-                    z_star, amps, args, loss_recorder, gt_deltas, ConGen)
+                    z_star, amps, args, loss_recorder, ConGen)
 
         for i, gan_model in enumerate(group_gan_models):
             torch.save(gan_model.gen.state_dict(), pjoin(args.save_path, f'gen{group[i]:03d}.pt'))

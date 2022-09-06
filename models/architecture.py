@@ -23,7 +23,7 @@ def get_pyramid_lengths(args, dest):
 
 
 def joint_train(all_reals, gens, gan_models, all_lengths, all_z_star, all_amps, args, loss_recorder,
-                gt_deltas=None, ConGen=None):
+                ConGen=None):
     """
     Train several stages jointly
     :param reals: Training examples, size equal to current group size
@@ -78,42 +78,6 @@ def joint_train(all_reals, gens, gan_models, all_lengths, all_z_star, all_amps, 
             if args.save_freq != 0 and (iters + 1) % args.save_freq == 0:
                 name = pjoin(steps_save_path, f'{(iters + 1) // args.save_freq:03d}x.pt')
                 torch.save(gan_model.gen.state_dict(), name)
-
-
-def realtime_example(gens, lengths, amps, conditions, trajs, args, layered_mask, full_noise=False):
-
-    interpolater = get_interpolator(args)
-    device = args.device
-
-    imgs = []
-    prev_img = torch.zeros((1, conditions[0].shape[1], lengths[0]), device=device)
-    # prev_img[:, :conditions[0].shape[1]] = conditions[0]
-    # prev_img[:, conditions[0].shape[1]:, layered_mask] = trajs
-    for step, (gen, length, amp, cond, traj) in enumerate(zip(gens, lengths, amps, conditions, trajs)):
-        length_cond = cond.shape[-1]
-        length_traj = traj.shape[-1]
-        n_channel = cond.shape[1] if full_noise else 1
-        noise = torch.randn((1, n_channel, length), device=device) * amp
-        if n_channel == 1:
-            noise = noise.repeat(1, cond.shape[1], 1)
-        noise = noise * torch.cat([
-                            torch.zeros((1, length_cond), device=device),
-                            torch.linspace(0, 1, length_traj).unsqueeze(0)
-                        ], dim=-1)
-        full_cond = torch.cat([cond[:, layered_mask], traj], dim=-1)
-        if step < args.num_layered_generator:
-            res = gen(noise + prev_img, prev_img, cond=full_cond, cond_requires_mask=False)
-        else:
-            res = gen(noise + prev_img, prev_img)
-
-        res = res + prev_img
-        if True:
-            res[..., :length_cond] = cond[..., :length_cond]
-        imgs.append(res)
-        if step + 1 < len(lengths):
-            prev_img = interpolater(res, size=lengths[step + 1])
-
-    return imgs
 
 
 def blend_vis(a, b, s, prefix=''):
@@ -191,43 +155,6 @@ def build_data_pyramid(img, lengths, interpolator):
     return res
 
 
-def sliding_window(gens, amps, condition, traj, args, layered_mask, full_noise=False):
-    linear_interpolator = partial(F.interpolate, mode='linear', align_corners=False)
-    step = 50
-
-    length_cond = condition.shape[-1]
-    total_length = condition.shape[-1] + traj.shape[-1]
-
-    all_lenghts = [length_cond + step]
-    while all_lenghts[-1] < total_length:
-        all_lenghts.append(min(all_lenghts[-1] + step, total_length))
-    if all_lenghts[-1] - all_lenghts[-2] < 10:
-        all_lenghts[-2] = all_lenghts[-1]
-        all_lenghts = all_lenghts[:-1]
-
-    last_cond = condition
-    prev_length_pyramid = get_pyramid_lengths(args, length_cond)
-    all_res = []
-    all_res_origin = []
-    for final_length in all_lenghts:
-        length_pyramid = get_pyramid_lengths(args, final_length)
-        tarj_pyramid = [length_pyramid[i] - prev_length_pyramid[i] for i in range(len(length_pyramid))]
-
-        cur_trajs = build_data_pyramid(traj, tarj_pyramid, linear_interpolator)
-        cur_conds = build_data_pyramid(last_cond, prev_length_pyramid, linear_interpolator)
-
-        res = realtime_example(gens, length_pyramid, amps, cur_conds, cur_trajs, args, layered_mask, full_noise)
-        cond = res[-1]
-        all_res_origin.append(cond.clone())
-        cond[..., :last_cond.shape[-1] - step//2] = last_cond[..., : -step//2]
-        cond[:, layered_mask, length_cond:] = traj[..., :final_length - length_cond]
-        prev_length_pyramid = length_pyramid
-        last_cond = cond
-        all_res.append(cond)
-
-    return cond, all_res, all_res_origin
-
-
 def draw_example(gens, mode, z_star, lengths, amps, batch_size, args, all_img=False, start_level=0,
                  conds=None, full_noise=False, num_cond=0, given_noise=None):
     """
@@ -247,8 +174,8 @@ def draw_example(gens, mode, z_star, lengths, amps, batch_size, args, all_img=Fa
     :return: generated image(s)
     """
     if not isinstance(conds, list): conds = [conds]
-    if args.layered_generator:
-        num_cond = args.num_layered_generator
+    if args.conditional_generator:
+        num_cond = args.num_conditional_generator
     else:
         # num_cond = 0
         pass
@@ -300,17 +227,34 @@ def draw_example(gens, mode, z_star, lengths, amps, batch_size, args, all_img=Fa
 
 
 class FullGenerator:
-    def __init__(self, args, motion_data, gens, z_star, amps):
+    def __init__(self, args, motion_data, gens, z_star, amps, output_mask=None):
         self.args = args
         self.motion_data = motion_data
         self.gens = gens
         self.z_star = z_star
         self.amps = amps
+        self.output_mask = output_mask
 
     def random_generate(self, lengths, down_sample=True):
         imgs_random = draw_example(self.gens[:len(lengths)], 'random', self.z_star, lengths + [1], self.amps, 1,
                                    self.args, all_img=True, start_level=0, conds=None,
                                    full_noise=self.args.full_noise)
+
+        if self.output_mask is not None:
+            repr6d_identity = torch.tensor([1., 0., 0., 0., 1., 0.], device=self.args.device)
+            imgs_masked = []
+            for img in imgs_random:
+                img_masked = torch.empty_like(img)
+                if self.args.repr == 'repr6d':
+                    img_masked = img_masked.permute(0, 2, 1).reshape(-1, 6)
+                    img_masked[:] = repr6d_identity
+                    img_masked = img_masked.reshape(img.shape[0], img.shape[2], img.shape[1]).permute(0, 2, 1)
+                    img_masked[:, self.output_mask] = img[:, self.output_mask]
+                    imgs_masked.append(img_masked)
+                else:
+                    raise Exception('Identity representation not implemented')
+            imgs_random = imgs_masked
+
         if down_sample:
             return self.downsample_generate(lengths, imgs_random[-1])
         else:

@@ -2,10 +2,12 @@ import torch
 import os
 from os.path import join as pjoin
 from dataset.motion import MotionData, load_multiple_dataset
-from models import create_model, create_layered_model
+from models import create_model, create_conditional_model
 from models.architecture import draw_example, get_pyramid_lengths, FullGenerator
 from option import TestOptionParser, TrainOptionParser
 from fix_contact import fix_contact_on_file
+from models.utils import get_layered_mask
+from interactive_utils import sliding_window
 
 
 def load_all_from_path(save_path, device, use_class=False):
@@ -41,7 +43,7 @@ def load_all_from_path(save_path, device, use_class=False):
 
     gens = []
     for step, length in enumerate(lengths[0]):
-        create = create_layered_model if args.layered_generator and step < args.num_layered_generator else create_model
+        create = create_conditional_model if args.conditional_generator and step < args.num_conditional_generator else create_model
         gen = create(args, motion_data, evaluation=True)
         try:
             gen_sate = torch.load(pjoin(args.save_path, f'gen{step:03d}.pt'), map_location=device)
@@ -102,8 +104,11 @@ def main():
 
     if len(args.path_to_existing):
         ConGen = load_all_from_path(args.path_to_existing, args.device, use_class=True)
+        ConGen.output_mask = get_layered_mask(args.conditional_mode, motion_data.n_rot)
+        conds_rec = [motion_data.sample(lengths[0][i]) for i in range(args.num_conditional_generator)]
     else:
         ConGen = None
+        conds_rec = None
 
     print('levels:', lengths)
     save_path = pjoin(args.save_path, 'bvh')
@@ -112,7 +117,6 @@ def main():
     base_id = 0
 
     # Evaluate with reconstruct noise
-    conds_rec = None
     for i in range(len(multiple_data)):
         motion_data = multiple_data[i]
         imgs = draw_example(gens, 'rec', z_stars[i], lengths[i] + [1], amps[i], 1, args, all_img=True, conds=conds_rec,
@@ -125,8 +129,50 @@ def main():
             rec_loss = torch.nn.MSELoss()(imgs[-1], real).detach().cpu().numpy()
             print(f'rec_loss: {rec_loss.item():.07f}')
 
-    target_len = test_args.target_length
-    target_length = get_pyramid_lengths(args, target_len)
+    generation_mode = 'manip' if test_args.style_transfer or test_args.keyframe_editing else 'random'
+
+    if test_args.style_transfer:
+        manip_data = MotionData(f'{test_args.style_transfer}',
+                                padding=args.skeleton_aware, use_velo=args.use_velo, repr=args.repr,
+                                contact=args.contact, keep_y_pos=args.keep_y_pos,
+                                no_scale=False)
+        target_len = len(manip_data)
+        target_length = get_pyramid_lengths(args, target_len)
+        conds = manip_data.sample(target_length[0])
+    elif test_args.keyframe_editing:
+        manip_data = MotionData(f'{test_args.keyframe_editing}',
+                                padding=args.skeleton_aware, use_velo=args.use_velo, repr=args.repr,
+                                contact=args.contact, keep_y_pos=args.keep_y_pos,
+                                no_scale=True)
+        target_len = len(multiple_data[0])                       # Use original length of training data
+        target_length = get_pyramid_lengths(args, target_len)
+        conds = manip_data.sample(target_length[0])
+    elif test_args.conditional_generation:
+        manip_data = MotionData(f'{test_args.conditional_generation}',
+                                padding=args.skeleton_aware, use_velo=args.use_velo, repr=args.repr,
+                                contact=args.contact, keep_y_pos=args.keep_y_pos,
+                                no_scale=True)
+        target_len = len(manip_data)  # Use original length of training data
+        target_length = get_pyramid_lengths(args, target_len)
+        conds = [manip_data.sample(l) for l in target_length[:args.num_conditional_generator]]
+        conds_full = conds[-1]
+        generation_mode = 'cond'
+        if not args.conditional_generator:
+            raise Exception('Conditional generation only applicable to conditional generators.')
+    elif args.conditional_generator:
+        "This is a conditional model, but the condition is not given. Then the condition will be sampled from the ConGen model"
+        target_len = test_args.target_length
+        target_length = get_pyramid_lengths(args, target_len)
+        manip_data = None
+        conds = ConGen.random_generate(target_length)
+        conds_full = conds[-1]
+        conds = conds[:args.num_conditional_generator]
+    else:
+        target_len = test_args.target_length
+        target_length = get_pyramid_lengths(args, target_len)
+        manip_data = None
+        conds = None
+
     while len(target_length) > n_total_levels:
         target_length = target_length[1:]
     z_length = target_length[0]
@@ -137,10 +183,21 @@ def main():
     amps2 = amps[base_id].clone()
     amps2[1:] = 0
 
-    imgs = draw_example(gens, 'random', z_stars[base_id], target_length, amps2, 1, args, all_img=True,
-                        conds=None, full_noise=args.full_noise, given_noise=[z_target])
+    if not test_args.interactive:
+        imgs = draw_example(gens, generation_mode, z_stars[base_id], target_length, amps2, 1, args, all_img=True,
+                            conds=conds, full_noise=args.full_noise, given_noise=[z_target])
+    else:
+        if not args.conditional_generator:
+            raise Exception('Interactive mode only applicable to conditional generators.')
+        final_res, imgs = sliding_window(gens, z_stars[base_id], amps2, conds_full, args)
+
     motion_data.write(pjoin(save_path, f'result.bvh'), imgs[-1])
     fix_contact_on_file(save_path, name=f'result')
+
+    if manip_data is not None:
+        motion_data.write(pjoin(save_path, 'manipulate_input.bvh'), manip_data.sample())
+    elif args.conditional_generator:
+        motion_data.write(pjoin(save_path, 'generated_traj.bvh'), conds_full)
 
 
 if __name__ == '__main__':

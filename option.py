@@ -29,17 +29,14 @@ class OptionParser:
         self.parser.add_argument('--enforce_contact', type=int, default=1)
         self.parser.add_argument('--slerp', type=int, default=0)
         self.parser.add_argument('--nearest_interpolation', type=int, default=0)
-        self.parser.add_argument('--layered_generator', type=int, default=0)
-        self.parser.add_argument('--layered_full_receptive', type=int, default=0)
-        self.parser.add_argument('--layered_discriminator', type=int, default=0)
-        self.parser.add_argument('--layer_mode', type=str, default='locrot')
+        self.parser.add_argument('--conditional_generator', type=int, default=0)
+        self.parser.add_argument('--conditional_mode', type=str, default='locrot')
         self.parser.add_argument('--full_noise', type=int, default=0)
-        self.parser.add_argument('--num_layered_generator', type=int, default=1)
+        self.parser.add_argument('--num_conditional_generator', type=int, default=7)
         self.parser.add_argument('--keep_y_pos', type=int, default=1)
         self.parser.add_argument('--path_to_existing', type=str, default='')
         self.parser.add_argument('--num_stages_limit', type=int, default=-1)
         self.parser.add_argument('--group_size', type=int, default=2)
-        self.parser.add_argument('--new_layered', type=int, default=0)
         self.parser.add_argument('--multiple_sequences', type=int, default=0)
         self.parser.add_argument('--joint_reduction', type=int, default=1)
         self.parser.add_argument('--use_factor_channel_list', type=int, default=0)
@@ -50,8 +47,8 @@ class OptionParser:
     def checker(args):
         if args.slerp:
             raise Exception('Slerp is no longer supported.')
-        if args.nearest_interpolation and args.layered_generator:
-            raise Exception('LayeredGenerator with nearest interpolation not yet implemented')
+        if args.nearest_interpolation and args.conditional_generator:
+            raise Exception('Conditional with nearest interpolation not yet implemented')
         if args.multiple_sequences and len(args.path_to_existing) > 0:
             raise Exception('Does not support conditional generation for multiple sequences.')
         if not args.contact and (args.enforce_contact or args.enforce_lower):
@@ -115,3 +112,7 @@ class TestOptionParser(OptionParser):
     def __init__(self):
         super(TestOptionParser, self).__init__()
         self.parser.add_argument('--target_length', type=int, default=600)
+        self.parser.add_argument('--style_transfer', type=str, default='')
+        self.parser.add_argument('--keyframe_editing', type=str, default='')
+        self.parser.add_argument('--conditional_generation', type=str, default='')
+        self.parser.add_argument('--interactive', type=int, default=0)

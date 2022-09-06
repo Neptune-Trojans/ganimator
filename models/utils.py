@@ -4,21 +4,6 @@ import random
 from models.transforms import repr6d2quat, euler2mat
 import torch.nn.functional as F
 from functools import partial
-from scipy.ndimage.filters import gaussian_filter
-
-
-def gaussian_filter_wrapper(x: torch.Tensor, sigma: float):
-    res = []
-    for i in range(x.shape[1]):
-        nx = x[:, [i]]
-        n_shape = nx.shape
-        nx = nx.reshape(-1)
-        nx = gaussian_filter(nx.numpy(), sigma=sigma, mode='nearest')
-        nx = torch.tensor(nx)
-        nx = nx.reshape(n_shape)
-        res.append(nx)
-    res = torch.cat(res, dim=1)
-    return res
 
 
 def get_layered_mask(layer_mode, n_rot=6):
@@ -28,15 +13,10 @@ def get_layered_mask(layer_mode, n_rot=6):
     :param n_rot: number of channels for a rotation
     :return:
     """
-    if 'xz' in layer_mode:
-        mask_loc = [-6, -4]
-    else:
-        mask_loc = [-6, -5, -4]
+    mask_loc = [-6, -5, -4]
 
     if 'locrot' in layer_mode:
         mask_layered = mask_loc + list(range(n_rot))
-    elif 'loc' in layer_mode:
-        mask_layered = mask_loc
     elif 'all' in layer_mode:
         mask_layered = slice(None)
     else:
@@ -203,40 +183,3 @@ class RecLoss(nn.Module):
             a = self.motion_data.velo2pos(a)
             b = self.motion_data.velo2pos(b)
         return self.criteria(a, b) + loss_pos * self.lambda_pos
-
-
-class DeltaLoss(nn.Module):
-    def __init__(self, delta_loss_mode, n_rot, uniform, deduction, gt_delta=None, eps=1e-6, previous_length=None):
-        super(DeltaLoss, self).__init__()
-        self.eps = eps
-        self.uniform = uniform
-        self.deduction = deduction
-        self.channels = get_layered_mask(delta_loss_mode, n_rot)
-        self.gt_delta = self.get_gt_delta(gt_delta) if gt_delta is not None else None
-        self.normalizer = None
-        self.previous_length = previous_length
-
-    def get_gt_delta(self, gt_delta):
-        gt_delta = gt_delta[:, self.channels]
-        gt_delta = (gt_delta ** 2).mean(dim=-1, keepdim=True)
-        return gt_delta
-
-    def set_gt_delta(self, gt_delta):
-        self.gt_delta = self.get_gt_delta(gt_delta)
-        self.normalizer = self.gt_delta.clone()
-        self.normalizer[self.normalizer < self.eps] = self.eps
-
-    def __call__(self, res):
-        if self.gt_delta is None:
-            return torch.tensor(0., device=res.device)
-        if self.previous_length is not None:
-            interpolator = get_interpolator(linear=True)
-            res = interpolator(res, self.previous_length)
-        res = res[:, self.channels]
-        res = res**2
-        if self.deduction:
-            res = res - self.gt_delta
-        if self.uniform:
-            res = res / self.normalizer
-        res = torch.relu(res)
-        return res.mean()
